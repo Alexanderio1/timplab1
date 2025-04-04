@@ -11,6 +11,8 @@ namespace timplab1
             bool isRunning = true;
 
             Console.WriteLine("Добро пожаловать в тестирующую программу виртуального массива!");
+            Console.WriteLine("Введите 'help' для получения списка доступных команд.");
+
             while (isRunning)
             {
                 Console.Write("VM> ");
@@ -24,6 +26,10 @@ namespace timplab1
 
                 switch (command)
                 {
+                    case "help":
+                        ShowHelp();
+                        break;
+
                     case "create":
                         if (arguments == null)
                         {
@@ -92,18 +98,18 @@ namespace timplab1
                     case "input":
                         if (virtualArrayManager == null)
                         {
-                            Console.WriteLine("Ошибка: массив не создан. Используйте команду Create.");
+                            Console.WriteLine("Ошибка: массив не создан. Используйте команду create.");
                             break;
                         }
                         if (arguments == null)
                         {
-                            Console.WriteLine("Ошибка: недостаточно аргументов для команды Input.");
+                            Console.WriteLine("Ошибка: недостаточно аргументов для команды input.");
                             break;
                         }
                         string[] inputArgs = arguments.Split(',', 2, StringSplitOptions.RemoveEmptyEntries);
                         if (inputArgs.Length < 2)
                         {
-                            Console.WriteLine("Ошибка: неверный формат команды Input.");
+                            Console.WriteLine("Ошибка: неверный формат команды input.");
                             break;
                         }
                         try
@@ -120,7 +126,6 @@ namespace timplab1
                             else if (virtualArrayManager.ArrayType == typeof(char))
                             {
                                 // Ожидается строка в кавычках, например "A" или "Hello" (если фиксированная длина >1)
-                                // Удаляем кавычки, если есть
                                 if (valueStr.StartsWith("\"") && valueStr.EndsWith("\""))
                                     valueStr = valueStr.Substring(1, valueStr.Length - 2);
                                 virtualArrayManager.WriteElement(index, valueStr);
@@ -148,12 +153,12 @@ namespace timplab1
                     case "print":
                         if (virtualArrayManager == null)
                         {
-                            Console.WriteLine("Ошибка: массив не создан. Используйте команду Create.");
+                            Console.WriteLine("Ошибка: массив не создан. Используйте команду create.");
                             break;
                         }
                         if (arguments == null)
                         {
-                            Console.WriteLine("Ошибка: недостаточно аргументов для команды Print.");
+                            Console.WriteLine("Ошибка: недостаточно аргументов для команды print.");
                             break;
                         }
                         try
@@ -188,18 +193,55 @@ namespace timplab1
                         }
                         break;
 
+                    case "info":
+                        if (virtualArrayManager != null)
+                        {
+                            int elementsPerPage = (virtualArrayManager.ArrayType == typeof(int)) ? 124 : 128;
+                            Console.WriteLine(
+                                "Информация о виртуальном массиве:" +
+                                $"\nТип: {virtualArrayManager.ArrayType.Name}" +
+                                $"\nРазмер массива: {virtualArrayManager.ArraySize} элементов" +
+                                $"\nЭлементов на странице: {elementsPerPage}" +
+                                $"\nФайл: {virtualArrayManager.FilePath}"
+                            );
+                        }
+                        else
+                        {
+                            Console.WriteLine("Виртуальный массив не создан. Используйте команду create.");
+                        }
+                        break;
+
                     case "exit":
                         Console.WriteLine("Завершение программы...");
-                        // Здесь можно добавить закрытие файлов и выгрузку буфера
                         virtualArrayManager?.Close();
                         isRunning = false;
                         break;
 
                     default:
-                        Console.WriteLine("Ошибка: неизвестная команда.");
+                        Console.WriteLine("Ошибка: неизвестная команда. Введите 'help' для справки.");
                         break;
                 }
             }
+        }
+
+        static void ShowHelp()
+        {
+            Console.WriteLine("\nСписок доступных команд:");
+            Console.WriteLine("  create <имя_файла>, <тип>  - Создать виртуальный массив.");
+            Console.WriteLine("       Примеры:");
+            Console.WriteLine("         create data.bin, int");
+            Console.WriteLine("         create data.bin, char(5)");
+            Console.WriteLine("         create data.bin, varchar(20)");
+            Console.WriteLine("  input <индекс>, <значение> - Записать значение в элемент массива.");
+            Console.WriteLine("       Примеры:");
+            Console.WriteLine("         input 0, 183");
+            Console.WriteLine("         input 15, \"Hello\"");
+            Console.WriteLine("  print <индекс>           - Вывести значение элемента массива по индексу.");
+            Console.WriteLine("       Пример:");
+            Console.WriteLine("         print 0");
+            Console.WriteLine("  info                     - Вывести информацию о созданном виртуальном массиве.");
+            Console.WriteLine("  help                     - Показать это справочное сообщение.");
+            Console.WriteLine("  exit                     - Завершить программу.\n");
         }
     }
 }

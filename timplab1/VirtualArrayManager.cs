@@ -9,7 +9,7 @@ namespace timplab1
     {
         public const int PAGE_SIZE = 512;              // Размер страницы в байтах
         private const int SIGNATURE_LENGTH = 2;         // Сигнатура – 2 байта ("ВМ")
-        private readonly string FilePath;
+        public string FilePath { get; private set; }
 
         public long ArraySize { get; private set; }     // Общее количество элементов
         public Type ArrayType { get; private set; }       // Тип элементов (int, char, string)
@@ -69,7 +69,7 @@ namespace timplab1
             if (!fileExists)
             {
                 // Записываем сигнатуру (две байта, например "ВМ")
-                byte[] signature = System.Text.Encoding.ASCII.GetBytes("ВМ");
+                byte[] signature = System.Text.Encoding.ASCII.GetBytes("VM");
                 fileStream.Write(signature, 0, SIGNATURE_LENGTH);
 
                 // Резервируем место под страницы: TotalPages * PAGE_SIZE байт
