@@ -52,7 +52,6 @@ namespace timplab1
                         {
                             if (typeAndSize.StartsWith("int"))
                             {
-                                // Для теста размер массива задаём, например, 10000 элементов.
                                 virtualArrayManager = new VirtualArrayManager(fileName, 10000, typeof(int));
                                 Console.WriteLine($"Создан виртуальный массив типа int в файле {fileName}.");
                             }
@@ -125,7 +124,6 @@ namespace timplab1
                             }
                             else if (virtualArrayManager.ArrayType == typeof(char))
                             {
-                                // Ожидается строка в кавычках, например "A" или "Hello" (если фиксированная длина >1)
                                 if (valueStr.StartsWith("\"") && valueStr.EndsWith("\""))
                                     valueStr = valueStr.Substring(1, valueStr.Length - 2);
                                 virtualArrayManager.WriteElement(index, valueStr);
