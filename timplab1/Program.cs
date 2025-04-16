@@ -36,7 +36,7 @@ namespace timplab1
                             Console.WriteLine("Ошибка: недостаточно аргументов для команды Create.");
                             break;
                         }
-                        // Ожидаемый формат: имя_файла, тип
+                        // Формат: имя_файла, тип
                         // Примеры: data.bin, int   или   data.bin, char(5)   или   data.bin, varchar(20)
                         string[] createArgs = arguments.Split(',', 2, StringSplitOptions.RemoveEmptyEntries);
                         if (createArgs.Length < 2)
@@ -57,7 +57,6 @@ namespace timplab1
                             }
                             else if (typeAndSize.StartsWith("char"))
                             {
-                                // Ожидается формат char(длина), например char(5)
                                 int start = typeAndSize.IndexOf('(');
                                 int end = typeAndSize.IndexOf(')');
                                 if (start < 0 || end < 0 || end <= start + 1)
@@ -67,11 +66,10 @@ namespace timplab1
                                 }
                                 int fixedLength = int.Parse(typeAndSize.Substring(start + 1, end - start - 1), CultureInfo.InvariantCulture);
                                 virtualArrayManager = new VirtualArrayManager(fileName, 10000, typeof(char), fixedLength);
-                                Console.WriteLine($"Создан виртуальный массив типа char[{fixedLength}] в файле {fileName}.");
+                                Console.WriteLine($"Создан виртуальный массив типа char({fixedLength}) в файле {fileName}.");
                             }
                             else if (typeAndSize.StartsWith("varchar"))
                             {
-                                // Ожидается формат varchar(макс. длина), например varchar(20)
                                 int start = typeAndSize.IndexOf('(');
                                 int end = typeAndSize.IndexOf(')');
                                 if (start < 0 || end < 0 || end <= start + 1)
@@ -82,6 +80,7 @@ namespace timplab1
                                 int maxLength = int.Parse(typeAndSize.Substring(start + 1, end - start - 1), CultureInfo.InvariantCulture);
                                 virtualArrayManager = new VirtualArrayManager(fileName, 10000, typeof(string), maxLength);
                                 Console.WriteLine($"Создан виртуальный массив типа varchar({maxLength}) в файле {fileName}.");
+                                Console.WriteLine($"(Дополнительный файл для строк переменной длины: {fileName}.dat)");
                             }
                             else
                             {
@@ -105,46 +104,49 @@ namespace timplab1
                             Console.WriteLine("Ошибка: недостаточно аргументов для команды input.");
                             break;
                         }
-                        string[] inputArgs = arguments.Split(',', 2, StringSplitOptions.RemoveEmptyEntries);
-                        if (inputArgs.Length < 2)
                         {
-                            Console.WriteLine("Ошибка: неверный формат команды input.");
-                            break;
-                        }
-                        try
-                        {
-                            long index = long.Parse(inputArgs[0].Trim(), CultureInfo.InvariantCulture);
-                            string valueStr = inputArgs[1].Trim();
+                            // Разбиваем аргументы по запятой: <индекс>, <значение>
+                            string[] inputArgs = arguments.Split(',', 2, StringSplitOptions.RemoveEmptyEntries);
+                            if (inputArgs.Length < 2)
+                            {
+                                Console.WriteLine("Ошибка: неверный формат команды input.");
+                                break;
+                            }
+                            try
+                            {
+                                long index = long.Parse(inputArgs[0].Trim(), CultureInfo.InvariantCulture);
+                                string valueStr = inputArgs[1].Trim();
 
-                            if (virtualArrayManager.ArrayType == typeof(int))
-                            {
-                                int intValue = int.Parse(valueStr, CultureInfo.InvariantCulture);
-                                virtualArrayManager.WriteElement(index, intValue);
-                                Console.WriteLine($"Значение {intValue} записано в элемент с индексом {index}.");
-                            }
-                            else if (virtualArrayManager.ArrayType == typeof(char))
-                            {
+                                // Если строка обрамлена кавычками, снимаем их
                                 if (valueStr.StartsWith("\"") && valueStr.EndsWith("\""))
                                     valueStr = valueStr.Substring(1, valueStr.Length - 2);
-                                virtualArrayManager.WriteElement(index, valueStr);
-                                Console.WriteLine($"Строка \"{valueStr}\" записана в элемент с индексом {index}.");
+
+                                if (virtualArrayManager.ArrayType == typeof(int))
+                                {
+                                    int intValue = int.Parse(valueStr, CultureInfo.InvariantCulture);
+                                    virtualArrayManager.WriteElement(index, intValue);
+                                    Console.WriteLine($"Значение {intValue} записано в элемент с индексом {index}.");
+                                }
+                                else if (virtualArrayManager.ArrayType == typeof(char))
+                                {
+                                    virtualArrayManager.WriteElement(index, valueStr);
+                                    Console.WriteLine($"Строка \"{valueStr}\" записана в элемент с индексом {index}.");
+                                }
+                                else if (virtualArrayManager.ArrayType == typeof(string))
+                                {
+                                    // Для varchar вызываем специальный метод
+                                    virtualArrayManager.WriteElementVarchar(index, valueStr);
+                                    Console.WriteLine($"Строка (varchar) \"{valueStr}\" записана в элемент с индексом {index}.");
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Ошибка: неподдерживаемый тип массива.");
+                                }
                             }
-                            else if (virtualArrayManager.ArrayType == typeof(string))
+                            catch (Exception ex)
                             {
-                                // Для varchar
-                                if (valueStr.StartsWith("\"") && valueStr.EndsWith("\""))
-                                    valueStr = valueStr.Substring(1, valueStr.Length - 2);
-                                virtualArrayManager.WriteElement(index, valueStr);
-                                Console.WriteLine($"Строка \"{valueStr}\" записана в элемент с индексом {index}.");
+                                Console.WriteLine($"Ошибка при записи значения: {ex.Message}");
                             }
-                            else
-                            {
-                                Console.WriteLine("Ошибка: неподдерживаемый тип массива.");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Ошибка при записи значения: {ex.Message}");
                         }
                         break;
 
@@ -159,49 +161,63 @@ namespace timplab1
                             Console.WriteLine("Ошибка: недостаточно аргументов для команды print.");
                             break;
                         }
-                        try
                         {
-                            long index = long.Parse(arguments.Trim(), CultureInfo.InvariantCulture);
-                            if (virtualArrayManager.ArrayType == typeof(int))
+                            try
                             {
-                                if (virtualArrayManager.ReadElement(index, out int intValue))
+                                long index = long.Parse(arguments.Trim(), CultureInfo.InvariantCulture);
+
+                                if (virtualArrayManager.ArrayType == typeof(int))
                                 {
-                                    Console.WriteLine($"Значение элемента с индексом {index}: {intValue}");
+                                    if (virtualArrayManager.ReadElement(index, out int intValue))
+                                    {
+                                        Console.WriteLine($"Значение элемента с индексом {index}: {intValue}");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"Ошибка: элемент с индексом {index} не найден (битовая карта = 0).");
+                                    }
                                 }
-                                else
+                                else if (virtualArrayManager.ArrayType == typeof(char))
                                 {
-                                    Console.WriteLine($"Ошибка: элемент с индексом {index} не найден.");
+                                    if (virtualArrayManager.ReadElement(index, out string strValue))
+                                    {
+                                        Console.WriteLine($"Значение элемента с индексом {index}: \"{strValue}\"");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"Ошибка: элемент с индексом {index} не найден (битовая карта = 0).");
+                                    }
+                                }
+                                else if (virtualArrayManager.ArrayType == typeof(string))
+                                {
+                                    if (virtualArrayManager.ReadElementVarchar(index, out string varStr))
+                                    {
+                                        Console.WriteLine($"Значение элемента (varchar) с индексом {index}: \"{varStr}\"");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"Ошибка: элемент с индексом {index} не найден (битовая карта = 0).");
+                                    }
                                 }
                             }
-                            else if (virtualArrayManager.ArrayType == typeof(char) || virtualArrayManager.ArrayType == typeof(string))
+                            catch (Exception ex)
                             {
-                                if (virtualArrayManager.ReadElement(index, out string strValue))
-                                {
-                                    Console.WriteLine($"Значение элемента с индексом {index}: \"{strValue}\"");
-                                }
-                                else
-                                {
-                                    Console.WriteLine($"Ошибка: элемент с индексом {index} не найден.");
-                                }
+                                Console.WriteLine($"Ошибка при чтении значения: {ex.Message}");
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Ошибка при чтении значения: {ex.Message}");
                         }
                         break;
 
                     case "info":
                         if (virtualArrayManager != null)
                         {
-                            int elementsPerPage = (virtualArrayManager.ArrayType == typeof(int)) ? 124 : 128;
-                            Console.WriteLine(
-                                "Информация о виртуальном массиве:" +
-                                $"\nТип: {virtualArrayManager.ArrayType.Name}" +
-                                $"\nРазмер массива: {virtualArrayManager.ArraySize} элементов" +
-                                $"\nЭлементов на странице: {elementsPerPage}" +
-                                $"\nФайл: {virtualArrayManager.FilePath}"
-                            );
+                            Console.WriteLine("Информация о виртуальном массиве:");
+                            Console.WriteLine($"Тип: {virtualArrayManager.ArrayType.Name}");
+                            Console.WriteLine($"Размер массива: {virtualArrayManager.ArraySize} элементов");
+                            Console.WriteLine($"Файл: {virtualArrayManager.FilePath}");
+                            if (virtualArrayManager.ArrayType == typeof(string))
+                            {
+                                Console.WriteLine($"Файл строк (для varchar): {virtualArrayManager.DataFilePath}");
+                            }
                         }
                         else
                         {
@@ -232,14 +248,13 @@ namespace timplab1
             Console.WriteLine("         create data.bin, varchar(20)");
             Console.WriteLine("  input <индекс>, <значение> - Записать значение в элемент массива.");
             Console.WriteLine("       Примеры:");
-            Console.WriteLine("         input 0, 183");
-            Console.WriteLine("         input 15, \"Hello\"");
-            Console.WriteLine("  print <индекс>           - Вывести значение элемента массива по индексу.");
-            Console.WriteLine("       Пример:");
+            Console.WriteLine("         input 0, 183        (для int)");
+            Console.WriteLine("         input 15, \"Hello\"  (для char / varchar)");
+            Console.WriteLine("  print <индекс>             - Вывести значение элемента массива по индексу.");
             Console.WriteLine("         print 0");
-            Console.WriteLine("  info                     - Вывести информацию о созданном виртуальном массиве.");
-            Console.WriteLine("  help                     - Показать это справочное сообщение.");
-            Console.WriteLine("  exit                     - Завершить программу.\n");
+            Console.WriteLine("  info                       - Вывести информацию о созданном виртуальном массиве.");
+            Console.WriteLine("  help                       - Показать справочную информацию.");
+            Console.WriteLine("  exit                       - Завершить программу.\n");
         }
     }
 }
