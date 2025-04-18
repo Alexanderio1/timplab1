@@ -1,487 +1,365 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Text;
 
 namespace timplab1
 {
+    /// <summary>
+    ///  Управление «виртуальным» массивом‑файлом: int, char(…),
+    ///  varchar(…) (с доп.‑файлом).  Буфер = 3 страницы, алгоритм LRU,
+    ///  в консоль выводятся события подкачки страниц.
+    /// </summary>
     public class VirtualArrayManager
     {
-        private const int SIGNATURE_LENGTH = 2; // "VM"
-        private const int BITMAP_SIZE = 16;
+        private const int SIGNATURE_LENGTH = 2;        // "VM"
+        private const int BITMAP_SIZE = 16;       // 128 бит
 
-        // Для int / varchar-адресов
-        private const int INT_DATA_SIZE = 512; // 128 * 4
-        private const int INT_PAGE_SIZE = BITMAP_SIZE + INT_DATA_SIZE; // 528
+        // int / varchar‑offset (4 байта на элемент)
+        private const int INT_DATA_SIZE = 512;         // 128 × 4
+        private const int INT_PAGE_SIZE = BITMAP_SIZE + INT_DATA_SIZE; // 528
 
-        private const int ELEMENTS_PER_PAGE = 128;
+        private const int ELEMENTS_PER_PAGE = 128;     // на каждой странице
 
-        // ------ Поля класса ------
-        private readonly string filePath;   // Основной файл (pagefile)
+        // ---------- файлы ----------
+        private readonly string filePath;              // основной .bin
         private FileStream fileStream;
 
-        // Только для varchar - отдельный .dat
-        private string dataFilePath;
+        private string dataFilePath;                   // для varchar
         private FileStream dataFileStream;
 
-        public long ArraySize { get; private set; }        // Кол-во элементов
-        public Type ArrayType { get; private set; }         // int / char / string(varchar)
-        public int FixedStringLength { get; private set; }  // для char(...) / varchar(...)
-
-        // Доступны на чтение извне (например, для команды info)
+        // ---------- параметры массива ----------
+        public long ArraySize { get; }
+        public Type ArrayType { get; }
+        public int FixedStringLength { get; }       // char / varchar
         public string FilePath => filePath;
         public string DataFilePath => dataFilePath;
 
-        private int dataSize;   // байт под «элементы» страницы
-        private int pageSize;   // итого байт на страницу (dataSize + BITMAP_SIZE)
-        private int totalPages;
+        // ---------- расчётные величины ----------
+        private readonly int dataSize;                 // байт данных в странице
+        private readonly int pageSize;                 // + BITMAP_SIZE
+        private readonly int totalPages;
 
-        private List<Page> pageBuffer; // буфер страниц (не менее 3)
+        // ---------- буфер страниц ----------
+        private readonly List<Page> pageBuffer = new();     // <= 3 страниц
 
-        // --------------------------------------------------------------------------------
-        //                        Конструктор
-        // --------------------------------------------------------------------------------
-
-        public VirtualArrayManager(string filePath, long arraySize, Type arrayType, int fixedStringLength = 0)
+        // =========================================================================
+        //                          КОНСТРУКТОР
+        // =========================================================================
+        public VirtualArrayManager(string filePath,
+                                   long arraySize,
+                                   Type arrayType,
+                                   int fixedStringLength = 0)
         {
             this.filePath = filePath;
             ArraySize = arraySize;
             ArrayType = arrayType;
             FixedStringLength = fixedStringLength;
 
-            pageBuffer = new List<Page>();
-
-            if (arrayType == typeof(int))
+            if (arrayType == typeof(int) || arrayType == typeof(string))
             {
-                // int = 128 * 4 (512) + 16 = 528
-                dataSize = INT_DATA_SIZE;
-                pageSize = INT_PAGE_SIZE;
+                dataSize = INT_DATA_SIZE;          // 512
+                pageSize = INT_PAGE_SIZE;          // 528
+                if (arrayType == typeof(string))
+                    dataFilePath = filePath + ".dat";
             }
             else if (arrayType == typeof(char))
             {
-                // char(L) → 128 * L → округлить до кратного 512 + 16
-                int rawSize = ELEMENTS_PER_PAGE * FixedStringLength;
-                dataSize = RoundUpToMultipleOf512(rawSize);
+                int raw = ELEMENTS_PER_PAGE * FixedStringLength;
+                dataSize = RoundUpTo512(raw);
                 pageSize = BITMAP_SIZE + dataSize;
             }
-            else if (arrayType == typeof(string))
-            {
-                // varchar → 128 * 4 + 16 = 528, плюс отдельный файл .dat
-                dataSize = INT_DATA_SIZE; // 512
-                pageSize = INT_PAGE_SIZE; // 528
-
-                dataFilePath = filePath + ".dat";
-            }
             else
-            {
-                throw new ArgumentException("Неподдерживаемый тип массива (int|char|varchar).");
-            }
+                throw new ArgumentException("Поддерживаются только int|char|varchar");
 
-            // Считаем количество страниц
-            totalPages = (int)Math.Ceiling(ArraySize / (double)ELEMENTS_PER_PAGE);
+            totalPages = (int)Math.Ceiling(arraySize / (double)ELEMENTS_PER_PAGE);
 
-            InitializeMainFile();
-            if (ArrayType == typeof(string))
-            {
-                InitializeDataFile();
-            }
+            InitMainFile();
+            if (ArrayType == typeof(string)) InitDataFile();
 
             LoadInitialPages();
         }
 
-        // --------------------------------------------------------------------------------
-        //                       Инициализация
-        // --------------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        //  ФАЙЛОВАЯ ИНИЦИАЛИЗАЦИЯ
+        // -------------------------------------------------------------------------
+        private static int RoundUpTo512(int v) => v % 512 == 0 ? v : v + 512 - v % 512;
 
-        private int RoundUpToMultipleOf512(int value)
+        private void InitMainFile()
         {
-            if (value <= 512)
-                return 512;
-            int remainder = value % 512;
-            if (remainder == 0)
-                return value;
-            return value + (512 - remainder);
-        }
-
-        private void InitializeMainFile()
-        {
-            bool fileExists = File.Exists(filePath);
+            bool exists = File.Exists(filePath);
             fileStream = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite);
 
-            if (!fileExists)
+            if (!exists)
             {
-                // Пишем сигнатуру "VM"
-                byte[] sig = Encoding.ASCII.GetBytes("VM");
-                fileStream.Write(sig, 0, SIGNATURE_LENGTH);
-
-                long totalSize = SIGNATURE_LENGTH + (long)totalPages * pageSize;
-                fileStream.SetLength(totalSize);
+                fileStream.Write(Encoding.ASCII.GetBytes("VM"), 0, SIGNATURE_LENGTH);
+                fileStream.SetLength(SIGNATURE_LENGTH + (long)totalPages * pageSize);
                 fileStream.Flush();
             }
         }
 
-        private void InitializeDataFile()
+        private void InitDataFile()
         {
-            // Файл для хранения фактических данных varchar
-            bool fileExists = File.Exists(dataFilePath);
             dataFileStream = new FileStream(dataFilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite);
-            if (!fileExists)
-            {
-                // Можно записать сигнатуру "VM2" - не обязательно
-            }
         }
 
+        // -------------------------------------------------------------------------
+        //  ПЕРВЫЕ 3 СТРАНИЦЫ В БУФЕР
+        // -------------------------------------------------------------------------
         private void LoadInitialPages()
         {
-            int pagesToLoad = Math.Min(3, totalPages);
-            for (int i = 0; i < pagesToLoad; i++)
-            {
-                Page page = LoadPageFromFile(i);
-                pageBuffer.Add(page);
-            }
+            int n = Math.Min(3, totalPages);
+            for (int i = 0; i < n; i++)
+                pageBuffer.Add(LoadPageFromDisk(i));
         }
 
-        // --------------------------------------------------------------------------------
-        //                 Чтение / запись страниц
-        // --------------------------------------------------------------------------------
-
-        private Page LoadPageFromFile(int pageNumber)
+        // -------------------------------------------------------------------------
+        //                ЗАГРУЗКА / ВЫГРУЗКА СТРАНИЦ
+        // -------------------------------------------------------------------------
+        private Page LoadPageFromDisk(int pageNo)
         {
-            long offset = SIGNATURE_LENGTH + (long)pageNumber * pageSize;
-            fileStream.Seek(offset, SeekOrigin.Begin);
+            long ofs = SIGNATURE_LENGTH + (long)pageNo * pageSize;
+            fileStream.Seek(ofs, SeekOrigin.Begin);
 
-            byte[] pageBytes = new byte[pageSize];
-            fileStream.Read(pageBytes, 0, pageSize);
+            byte[] buf = new byte[pageSize];
+            fileStream.Read(buf);
 
-            byte[] bitMap = new byte[BITMAP_SIZE];
-            Array.Copy(pageBytes, 0, bitMap, 0, BITMAP_SIZE);
-
+            byte[] map = new byte[BITMAP_SIZE];
             byte[] data = new byte[dataSize];
-            Array.Copy(pageBytes, BITMAP_SIZE, data, 0, dataSize);
+            Array.Copy(buf, 0, map, 0, BITMAP_SIZE);
+            Array.Copy(buf, BITMAP_SIZE, data, 0, dataSize);
 
-            var page = new Page(pageNumber, bitMap, data);
-            return page;
+            Console.WriteLine($"[SWAP‑IN ] <- страница {pageNo}");
+            return new Page(pageNo, map, data);
         }
 
-        private void SavePageToFile(Page page)
+        private void SavePageToDisk(Page pg)
         {
-            long offset = SIGNATURE_LENGTH + (long)page.PageNumber * pageSize;
-            fileStream.Seek(offset, SeekOrigin.Begin);
+            long ofs = SIGNATURE_LENGTH + (long)pg.PageNumber * pageSize;
+            fileStream.Seek(ofs, SeekOrigin.Begin);
 
-            byte[] pageBytes = new byte[pageSize];
-            Array.Copy(page.BitMap, 0, pageBytes, 0, BITMAP_SIZE);
-            Array.Copy(page.Data, 0, pageBytes, BITMAP_SIZE, dataSize);
+            byte[] buf = new byte[pageSize];
+            Array.Copy(pg.BitMap, buf, BITMAP_SIZE);
+            Array.Copy(pg.Data, 0, buf, BITMAP_SIZE, dataSize);
 
-            fileStream.Write(pageBytes, 0, pageBytes.Length);
+            fileStream.Write(buf);
             fileStream.Flush();
+            pg.ModificationFlag = false;
 
-            page.ModificationFlag = false;
+            Console.WriteLine($"[SWAP‑OUT] -> страница {pg.PageNumber}");
         }
 
-        // --------------------------------------------------------------------------------
-        //                 Буфер (минимум 3 страницы)
-        // --------------------------------------------------------------------------------
-
+        // -----------------------------------------------------------------------
+        //        ПОЛУЧИТЬ СТРАНИЦУ  (буфер 3 шт., вытеснение LRU)
+        // -----------------------------------------------------------------------
         private Page GetPage(long elementIndex)
         {
+            // --- контроль диапазона --------------------------------------------------
             if (elementIndex < 0 || elementIndex >= ArraySize)
-                throw new IndexOutOfRangeException($"Индекс {elementIndex} вне диапазона 0..{ArraySize - 1}");
+                throw new IndexOutOfRangeException(
+                    $"Индекс {elementIndex} вне диапазона 0..{ArraySize - 1}");
 
-            int pageNumber = (int)(elementIndex / ELEMENTS_PER_PAGE);
+            int pageNo = (int)(elementIndex / ELEMENTS_PER_PAGE);
 
-            Page page = pageBuffer.Find(p => p.PageNumber == pageNumber);
-            if (page != null)
+            // --- страница уже в памяти? ---------------------------------------------
+            Page pg = pageBuffer.Find(p => p.PageNumber == pageNo);
+            if (pg != null)
             {
-                page.LastAccessTime = DateTime.Now;
-                return page;
+                pg.LastAccessTime = DateTime.Now;
+                return pg;
             }
 
+            // --- буфер полон -> вытесняем старейшую (LRU) ----------------------------
             if (pageBuffer.Count >= 3)
             {
-                // Ищем самую старую
                 Page oldest = pageBuffer[0];
                 foreach (var p in pageBuffer)
-                {
-                    if (p.LastAccessTime < oldest.LastAccessTime)
-                        oldest = p;
-                }
-                if (oldest.ModificationFlag)
-                    SavePageToFile(oldest);
+                    if (p.LastAccessTime < oldest.LastAccessTime) oldest = p;
+
+                if (oldest.ModificationFlag) SavePageToDisk(oldest);
+                Console.WriteLine($"[SWAP‑OUT] -> страница {oldest.PageNumber}");
                 pageBuffer.Remove(oldest);
             }
 
-            Page newPage = LoadPageFromFile(pageNumber);
-            newPage.LastAccessTime = DateTime.Now;
-            pageBuffer.Add(newPage);
-            return newPage;
+            // --- подкачиваем нужную страницу -----------------------------------------
+            pg = LoadPageFromDisk(pageNo);          // в LoadPage… уже есть [SWAP‑IN]‑лог
+            pg.LastAccessTime = DateTime.Now;
+            pageBuffer.Add(pg);
+            return pg;
         }
 
+
+        // -------------------------------------------------------------------------
+        //  PUBLIC: ЗАКРЫТЬ ФАЙЛЫ
+        // -------------------------------------------------------------------------
         public void Close()
         {
             foreach (var p in pageBuffer)
-            {
-                if (p.ModificationFlag)
-                    SavePageToFile(p);
-            }
+                if (p.ModificationFlag) SavePageToDisk(p);
+
             fileStream?.Close();
             dataFileStream?.Close();
         }
 
-        // --------------------------------------------------------------------------------
-        //                      Методы для int
-        // --------------------------------------------------------------------------------
-
+        // =========================================================================
+        //                           INT
+        // =========================================================================
         public bool WriteElement(long index, int value)
         {
-            if (ArrayType != typeof(int))
-                throw new InvalidOperationException("Тип массива не int.");
-
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            page.SetIntValue(offset, value);
-            page.ModificationFlag = true;
-            page.LastAccessTime = DateTime.Now;
+            if (ArrayType != typeof(int)) throw new InvalidOperationException();
+            Page pg = GetPage(index);
+            pg.SetIntValue((int)(index % ELEMENTS_PER_PAGE), value);
+            pg.ModificationFlag = true;
             return true;
         }
 
         public bool ReadElement(long index, out int value)
         {
             value = 0;
-            if (ArrayType != typeof(int))
-                throw new InvalidOperationException("Тип массива не int.");
-
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            if (!page.IsElementSet(offset))
-                return false;
-
-            value = page.GetIntValue(offset);
+            if (ArrayType != typeof(int)) throw new InvalidOperationException();
+            Page pg = GetPage(index);
+            int off = (int)(index % ELEMENTS_PER_PAGE);
+            if (!pg.IsElementSet(off)) return false;
+            value = pg.GetIntValue(off);
             return true;
         }
 
-        // --------------------------------------------------------------------------------
-        //                      Методы для char(fixed)
-        // --------------------------------------------------------------------------------
-
-        public bool WriteElement(long index, string strValue)
+        // =========================================================================
+        //                           CHAR(FIXED)
+        // =========================================================================
+        public bool WriteElement(long index, string val)
         {
-            if (ArrayType != typeof(char))
-                throw new InvalidOperationException("Тип массива не char(...).");
+            if (ArrayType != typeof(char)) throw new InvalidOperationException();
+            if (val.Length > FixedStringLength) val = val[..FixedStringLength];
 
-            // Обрезаем по макс. длине
-            if (strValue.Length > FixedStringLength)
-                strValue = strValue.Substring(0, FixedStringLength);
-
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            page.SetStringValue(offset, strValue, FixedStringLength);
-            page.ModificationFlag = true;
-            page.LastAccessTime = DateTime.Now;
+            Page pg = GetPage(index);
+            pg.SetStringValue((int)(index % ELEMENTS_PER_PAGE), val, FixedStringLength);
+            pg.ModificationFlag = true;
             return true;
         }
 
-        public bool ReadElement(long index, out string strValue)
+        public bool ReadElement(long index, out string val)
         {
-            strValue = "";
-            if (ArrayType != typeof(char))
-                throw new InvalidOperationException("Тип массива не char(...).");
-
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            if (!page.IsElementSet(offset))
-                return false;
-
-            strValue = page.GetStringValue(offset, FixedStringLength);
+            val = "";
+            if (ArrayType != typeof(char)) throw new InvalidOperationException();
+            Page pg = GetPage(index);
+            int off = (int)(index % ELEMENTS_PER_PAGE);
+            if (!pg.IsElementSet(off)) return false;
+            val = pg.GetStringValue(off, FixedStringLength);
             return true;
         }
 
-        // --------------------------------------------------------------------------------
-        //                       Методы для varchar
-        // --------------------------------------------------------------------------------
-
-        /// <summary>
-        /// Записывает строку переменной длины, но не более FixedStringLength (maxLength).
-        /// 1) Если строка длиннее maxLength, обрезаем.
-        /// 2) Записываем (length + bytes) в .dat,
-        /// 3) В основной файл пишем 4-байтовый offset.
-        /// </summary>
-        public bool WriteElementVarchar(long index, string fullStr)
+        // =========================================================================
+        //                            VARCHAR
+        // =========================================================================
+        public bool WriteElementVarchar(long index, string text)
         {
-            if (ArrayType != typeof(string))
-                throw new InvalidOperationException("Тип массива не varchar.");
+            if (ArrayType != typeof(string)) throw new InvalidOperationException();
+            if (text.Length > FixedStringLength) text = text[..FixedStringLength];
 
-            if (dataFileStream == null)
-                throw new Exception("dataFileStream не инициализирован (null).");
+            long offset = dataFileStream.Seek(0, SeekOrigin.End);
+            if (offset > int.MaxValue)
+                throw new Exception("Offset > Int32");
 
-            // Применяем ограничение maxLength
-            if (fullStr.Length > FixedStringLength)
-            {
-                fullStr = fullStr.Substring(0, FixedStringLength);
-            }
-
-            // 1) Уходим в конец dataFile (доп. файл)
-            long offsetInData = dataFileStream.Seek(0, SeekOrigin.End);
-            if (offsetInData > int.MaxValue)
-                throw new Exception("Смещение превысило int.MaxValue");
-
-            // 2) Пишем 4 байта длины
-            int strLen = fullStr.Length;
-            byte[] lenBytes = BitConverter.GetBytes(strLen);
-            dataFileStream.Write(lenBytes, 0, 4);
-
-            // 3) Пишем сами байты строки
-            byte[] strBytes = Encoding.UTF8.GetBytes(fullStr);
-            dataFileStream.Write(strBytes, 0, strBytes.Length);
+            // запись в .dat  (4 байта length + bytes)
+            dataFileStream.Write(BitConverter.GetBytes(text.Length));
+            dataFileStream.Write(Encoding.UTF8.GetBytes(text));
             dataFileStream.Flush();
 
-            // 4) Полученное смещение (int) пишем в основной файл
-            int offsetInt = (int)offsetInData;
-            return WriteElementAsInt(index, offsetInt);
+            return WriteOffset(index, (int)offset);
         }
 
-        /// <summary>
-        /// Читает строку из .dat:
-        /// 1) Читаем offset (4 байта) из основной страницы,
-        /// 2) Идём в dataFileStream → first 4 байта = длина, далее столько байт строки.
-        /// </summary>
-        public bool ReadElementVarchar(long index, out string result)
+        public bool ReadElementVarchar(long index, out string text)
         {
-            result = "";
-            if (ArrayType != typeof(string))
-                throw new InvalidOperationException("Тип массива не varchar.");
-
-            if (!ReadElementAsInt(index, out int offset))
-            {
-                return false; // бит не установлен
-            }
-            if (offset < 0)
-            {
-                return false;
-            }
+            text = "";
+            if (ArrayType != typeof(string)) throw new InvalidOperationException();
+            if (!ReadOffset(index, out int offset)) return false;
 
             dataFileStream.Seek(offset, SeekOrigin.Begin);
+            Span<byte> lenBuf = stackalloc byte[4];
+            dataFileStream.Read(lenBuf);
+            int len = BitConverter.ToInt32(lenBuf);
 
-            // Читаем 4 байта длины
-            byte[] lenBytes = new byte[4];
-            dataFileStream.Read(lenBytes, 0, 4);
-            int strLen = BitConverter.ToInt32(lenBytes, 0);
-            if (strLen <= 0)
-            {
-                result = "";
-                return true;
-            }
-
-            // Читаем сами байты
-            byte[] strBytes = new byte[strLen];
-            dataFileStream.Read(strBytes, 0, strLen);
-
-            result = Encoding.UTF8.GetString(strBytes);
+            byte[] bytes = new byte[len];
+            dataFileStream.Read(bytes);
+            text = Encoding.UTF8.GetString(bytes);
             return true;
         }
 
-        // Вспомогательные методы для хранения offset (int) в «int-структуре» страницы.
-        private bool WriteElementAsInt(long index, int intValue)
+        // offset as INT inside normal page
+        private bool WriteOffset(long index, int off)
         {
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            page.SetIntValue(offset, intValue);
-            page.ModificationFlag = true;
-            page.LastAccessTime = DateTime.Now;
+            Page pg = GetPage(index);
+            pg.SetIntValue((int)(index % ELEMENTS_PER_PAGE), off);
+            pg.ModificationFlag = true;
             return true;
         }
 
-        private bool ReadElementAsInt(long index, out int intValue)
+        private bool ReadOffset(long index, out int off)
         {
-            intValue = 0;
-            Page page = GetPage(index);
-            int offset = (int)(index % ELEMENTS_PER_PAGE);
-            if (!page.IsElementSet(offset))
-                return false;
-
-            intValue = page.GetIntValue(offset);
+            off = 0;
+            Page pg = GetPage(index);
+            int pos = (int)(index % ELEMENTS_PER_PAGE);
+            if (!pg.IsElementSet(pos)) return false;
+            off = pg.GetIntValue(pos);
             return true;
         }
     }
 
     // =============================================================================
-    // Класс Page: хранит 16 байт битовой карты (на 128 элементов) + data (512 или
-    // выровненное число байт), где элемент может быть int или часть строки
+    //                                PAGE
     // =============================================================================
-    public class Page
+    internal class Page
     {
-        public int PageNumber { get; set; }
+        public int PageNumber { get; }
+        public byte[] BitMap { get; }
+        public byte[] Data { get; }
+
         public bool ModificationFlag { get; set; }
         public DateTime LastAccessTime { get; set; }
 
-        public byte[] BitMap { get; private set; }
-        public byte[] Data { get; private set; }
-
-        public Page(int pageNumber, byte[] bitMap, byte[] data)
+        public Page(int no, byte[] map, byte[] data)
         {
-            PageNumber = pageNumber;
-            BitMap = bitMap;
+            PageNumber = no;
+            BitMap = map;
             Data = data;
-            ModificationFlag = false;
             LastAccessTime = DateTime.Now;
         }
 
-        // ----------------- Работа с битовой картой -----------------
-        public bool IsElementSet(int offset)
+        // --- bitmap ---
+        public bool IsElementSet(int idx) =>
+            (BitMap[idx / 8] & (1 << (idx % 8))) != 0;
+
+        private void SetBit(int idx) =>
+            BitMap[idx / 8] |= (byte)(1 << (idx % 8));
+
+        // --- int / offset (4 байта) ---
+        public int GetIntValue(int idx) =>
+            BitConverter.ToInt32(Data, idx * 4);
+
+        public void SetIntValue(int idx, int val)
         {
-            int byteIndex = offset / 8;
-            int bitIndex = offset % 8;
-            if (byteIndex >= BitMap.Length)
-                return false;
-            return (BitMap[byteIndex] & (1 << bitIndex)) != 0;
+            Array.Copy(BitConverter.GetBytes(val), 0, Data, idx * 4, 4);
+            SetBit(idx);
         }
 
-        private void SetBit(int offset)
+        // --- fixed string ---
+        public string GetStringValue(int idx, int len)
         {
-            int byteIndex = offset / 8;
-            int bitIndex = offset % 8;
-            BitMap[byteIndex] |= (byte)(1 << bitIndex);
+            byte[] tmp = new byte[len];
+            Array.Copy(Data, idx * len, tmp, 0, len);
+            return Encoding.ASCII.GetString(tmp).TrimEnd('\0');
         }
 
-        // ----------------- Методы для int/varchar (4 байта) -----------------
-        public int GetIntValue(int offset)
+        public void SetStringValue(int idx, string s, int len)
         {
-            int dataOffset = offset * 4;
-            return BitConverter.ToInt32(Data, dataOffset);
-        }
+            byte[] buf = new byte[len];
+            byte[] src = Encoding.ASCII.GetBytes(s);
+            Array.Copy(src, buf, Math.Min(src.Length, len));
 
-        public void SetIntValue(int offset, int value)
-        {
-            int dataOffset = offset * 4;
-            byte[] bytes = BitConverter.GetBytes(value);
-            Array.Copy(bytes, 0, Data, dataOffset, 4);
-            SetBit(offset);
-        }
-
-        // ----------------- Методы для char(fixed) -----------------
-        public string GetStringValue(int offset, int fixedLen)
-        {
-            int dataOffset = offset * fixedLen;
-            if (dataOffset + fixedLen > Data.Length)
-                return "";
-
-            byte[] strBytes = new byte[fixedLen];
-            Array.Copy(Data, dataOffset, strBytes, 0, fixedLen);
-
-            // Удаляем завершающие \0
-            return Encoding.ASCII.GetString(strBytes).TrimEnd('\0');
-        }
-
-        public void SetStringValue(int offset, string value, int fixedLen)
-        {
-            int dataOffset = offset * fixedLen;
-            byte[] buffer = new byte[fixedLen];
-            byte[] valBytes = Encoding.ASCII.GetBytes(value);
-
-            int len = Math.Min(valBytes.Length, fixedLen);
-            Array.Copy(valBytes, buffer, len);
-
-            Array.Copy(buffer, 0, Data, dataOffset, fixedLen);
-            SetBit(offset);
+            Array.Copy(buf, 0, Data, idx * len, len);
+            SetBit(idx);
         }
     }
 }
