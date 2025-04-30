@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Globalization;
-using System.Text.RegularExpressions;   // <‑‑ добавили
+using System.Text.RegularExpressions;
 
 namespace timplab1
 {
@@ -164,7 +164,7 @@ namespace timplab1
                         {
                             long index = long.Parse(mPrint.Groups["idx"].Value, CultureInfo.InvariantCulture);
 
-                            /* — вывод значения (как и раньше) — */
+                            /* — вывод значения — */
                             if (virtualArrayManager.ArrayType == typeof(int) &&
                                 virtualArrayManager.ReadElement(index, out int intVal))
                                 Console.WriteLine($"[{index}] = {intVal}");
